@@ -47,6 +47,8 @@
 
 #include "cutlass/layout/permute.h"
 
+#include <lo_float.h>
+
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace cutlass {
@@ -55,117 +57,6 @@ namespace device {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-/*! Gemm device-level operator. This is an interface to efficient CUTLASS GEMM kernels that may
-  be invoked from host code.
-
-  The contributions of this class are:
-    
-    1. At compile time, it maps data types and high-level structural parameters onto 
-       specific CUTLASS components.
-
-    2. At runtime, it maps logical arguments to GEMM problems to kernel parameters.
-
-    3. At runtime, it launches kernels on the device.
-
-  The intent is to provide a convenient mechanism for interacting with most plausible GEMM
-  configurations for each supported architecture. Consequently, not all parameters are exposed
-  to the top-level interface. Rather, sensible defaults at each level of the CUTLASS hierarchy
-  are selected to tradeoff simplicity of the interface with flexibility. We expect 
-  most configurations to be specified at this level. Applications with more exotic requirements 
-  may construct their kernels of interest using CUTLASS components at the threadblock, warp, 
-  and thread levels of abstraction.
-
-  CUTLASS exposes computations using the functor design pattern in which objects compose some
-  internal state with an overloaded function call operator. This enables decoupling of
-  initialization from execution, possibly reducing overhead during steady state phases of
-  application execution.
-
-  CUTLASS device-level operators expose an Arguments structure encompassing each logical
-  input to the computation. This is distinct from the kernel-level Params structure pattern
-  which contains application-specific precomputed state needed by the device code.
-
-  Example of a CUTLASS GEMM operator implementing the functionality of cuBLAS's SGEMM NN
-  is as follows:
-
-    //
-    // Instantiate the CUTLASS GEMM operator.
-    //
-
-    cutlass::gemm::device::Gemm<
-      float,
-      cutlass::layout::ColumnMajor,
-      float,
-      cutlass::layout::ColumnMajor,
-      float,
-      cutlass::layout::ColumnMajor
-    > gemm_op;
-
-    //
-    // Launch the GEMM operation on the device
-    //
-
-    cutlass::Status status = gemm_op({
-      {m, n, k},                          // GemmCoord problem_size,
-      {A, lda},                           // TensorRef<float, layout::ColumnMajor> ref_A,
-      {B, ldb},                           // TensorRef<float, layout::ColumnMajor> ref_B,
-      {C, ldc},                           // TensorRef<float, layout::ColumnMajor> ref_C,
-      {D, ldd},                           // TensorRef<float, layout::ColumnMajor> ref_D,
-      {alpha, beta}                       // EpilogueOutputOp::Params epilogue_op_params
-    });
-
-
-  A simplified view of the template is listed below.
-
-    template <
-      /// Element type for A matrix operand
-      typename ElementA,
-      
-      /// Layout type for A matrix operand
-      typename LayoutA,
-      
-      /// Element type for B matrix operand
-      typename ElementB,
-      
-      /// Layout type for B matrix operand
-      typename LayoutB,
-      
-      /// Element type for C and D matrix operands
-      typename ElementC,
-      
-      /// Layout type for C and D matrix operands
-      typename LayoutC,
-      
-      /// Element type for internal accumulation
-      typename ElementAccumulator,
-
-      /// Operator class tag
-      typename OperatorClass,
-      
-      /// Tag indicating architecture to tune for.  This is the minimum SM that
-      /// supports the intended feature. The device kernel can be built
-      /// targeting any SM larger than this number.
-      typename ArchTag,
-      
-      /// Threadblock-level tile size (concept: GemmShape)
-      typename ThreadblockShape,
-      
-      /// Warp-level tile size (concept: GemmShape)
-      typename WarpShape,
-      
-      /// Warp-level tile size (concept: GemmShape)
-      typename InstructionShape,
-      
-      /// Epilogue output operator
-      typename EpilogueOutputOp,
-      
-      /// Threadblock-level swizzling operator
-      typename ThreadblockSwizzle,
-      
-      /// Number of stages used in the pipelined mainloop
-      int Stages
-    >
-    class Gemm;
-*/
 template <
     /// Element type for A matrix operand
     typename ElementA_,
@@ -307,15 +198,14 @@ class Gemm {
     int const *gather_B_indices;
     int const *scatter_D_indices;
 
+    // LoF accumulation parameters
+    int accum_mant_bits;
+    lo_float::Rounding_Mode rounding_mode;
+    int stochastic_rounding_bits;
+
     //
     // Methods
     //
-
-    /// Default ctor
-    CUTLASS_HOST_DEVICE
-    Arguments(): problem_size(0, 0, 0), split_k_slices(1) {
-
-    }
 
     /// Constructs an Arguments structure 
     CUTLASS_HOST_DEVICE
@@ -330,7 +220,10 @@ class Gemm {
       int split_k_slices = 1,
       int const *gather_A_indices_ = nullptr,
       int const *gather_B_indices_ = nullptr,
-      int const *scatter_D_indices_ = nullptr
+      int const *scatter_D_indices_ = nullptr,
+      int accum_mant_bits_ = 0,
+      lo_float::Rounding_Mode rounding_mode_ = lo_float::Rounding_Mode::RoundToNearestEven,
+      int stochastic_rounding_bits_ = 0
     ):
       problem_size(problem_size_),
       ref_A(ref_A_),
@@ -341,7 +234,10 @@ class Gemm {
       split_k_slices(split_k_slices),
       gather_A_indices(gather_A_indices_),
       gather_B_indices(gather_B_indices_),
-      scatter_D_indices(scatter_D_indices_) {
+      scatter_D_indices(scatter_D_indices_),
+      accum_mant_bits(accum_mant_bits_),
+      rounding_mode(rounding_mode_),
+      stochastic_rounding_bits(stochastic_rounding_bits_) {
 
     }
   };
@@ -433,6 +329,7 @@ public:
     }
 
     // Initialize the Params structure
+    // *** LoF fields forwarded here ***
     params_ = typename GemmKernel::Params{
       args.problem_size,
       grid_shape,
@@ -444,7 +341,10 @@ public:
       static_cast<int *>(workspace),
       args.gather_A_indices,
       args.gather_B_indices,
-      args.scatter_D_indices
+      args.scatter_D_indices,
+      args.accum_mant_bits,
+      args.rounding_mode,
+      args.stochastic_rounding_bits
     };
 
     return Status::kSuccess;
@@ -652,6 +552,12 @@ class Gemm<ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
     int *gather_B_indices;
     int *scatter_D_indices;
 
+    // LoF accumulation parameters
+    int accum_mant_bits;
+    lo_float::Rounding_Mode rounding_mode;
+    int stochastic_rounding_bits;
+    
+
     //
     // Methods
     //
@@ -673,7 +579,10 @@ class Gemm<ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
       int split_k_slices = 1,
       int *gather_A_indices_ = nullptr,
       int *gather_B_indices_ = nullptr,
-      int *scatter_D_indices_ = nullptr
+      int *scatter_D_indices_ = nullptr,   // <-- FIX: was missing comma here
+      int accum_mant_bits_ = 0,
+      lo_float::Rounding_Mode rounding_mode_ = lo_float::Rounding_Mode::RoundToNearestEven,
+      int stochastic_rounding_bits_ = 0
     ):
       problem_size(problem_size_),
       ref_A(ref_A_),
@@ -684,7 +593,10 @@ class Gemm<ElementA_, LayoutA_, ElementB_, LayoutB_, ElementC_,
       split_k_slices(split_k_slices),
       gather_A_indices(gather_A_indices_),
       gather_B_indices(gather_B_indices_),
-      scatter_D_indices(scatter_D_indices_) { }
+      scatter_D_indices(scatter_D_indices_), 
+      accum_mant_bits(accum_mant_bits_),
+      rounding_mode(rounding_mode_),
+      stochastic_rounding_bits(stochastic_rounding_bits_) {}
   };
 
 private:
@@ -696,7 +608,7 @@ public:
   /// Constructs the GEMM.
   Gemm() { }
 
-  /// Helper to construct a transposed equivalent for the underying GEMM operator
+  /// Helper to construct a transposed equivalent for the underlying GEMM operator
   static UnderlyingArguments to_underlying_arguments(Arguments const &args) {
     return UnderlyingArguments(
       {args.problem_size.n(), args.problem_size.m(), args.problem_size.k()},
@@ -708,7 +620,10 @@ public:
       args.split_k_slices,
       args.gather_B_indices,
       args.gather_A_indices,
-      args.scatter_D_indices
+      args.scatter_D_indices,
+      args.accum_mant_bits,           // LoF: forwarded
+      args.rounding_mode,             // LoF: forwarded
+      args.stochastic_rounding_bits   // LoF: forwarded
     );
   }
 

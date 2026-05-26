@@ -1,5 +1,5 @@
 /***************************************************************************************************
- * Copyright (c) 2017 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2017 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Redistribution and use in source and binary forms, with or without
@@ -44,6 +44,8 @@
 
 #include "cutlass/gemm/gemm.h"
 #include "cutlass/gemm/threadblock/mma_base.h"
+
+#include <lo_float.h>
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -169,10 +171,14 @@ public:
     int thread_idx,                                     ///< ID within the threadblock
     int warp_idx,                                       ///< ID of warp
     int lane_idx,                                       ///< ID of each thread within a warp
+    int accum_mant_bits = 0,                            ///< LoF mantissa bits for accumulation rounding
+    lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,  ///< LoF rounding mode
+    int stochastic_rounding_bits = 0,                   ///< LoF stochastic rounding bits
     TransformA transform_A = TransformA(),              ///< transformation applied to A fragment
     TransformB transform_B = TransformB()               ///< transformation applied to B fragment
   ):
     Base(shared_storage, thread_idx, warp_idx, lane_idx),
+    warp_mma(accum_mant_bits, rounding_mode, stochastic_rounding_bits),
     smem_iterator_A_(shared_storage.operand_A_ref(), thread_idx),
     smem_iterator_B_(shared_storage.operand_B_ref(), thread_idx),
     transform_A_(transform_A),

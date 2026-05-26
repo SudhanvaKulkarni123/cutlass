@@ -1,5 +1,5 @@
 /***************************************************************************************************
- * Copyright (c) 2017 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2017 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Redistribution and use in source and binary forms, with or without
@@ -44,6 +44,8 @@
 #include "cutlass/numeric_types.h"
 
 #include "cutlass/gemm/threadblock/mma_base.h"
+
+#include <lo_float.h>
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -218,9 +220,16 @@ public:
       ///< ID of warp
       int warp_idx,
       ///< ID of each thread within a warp
-      int lane_idx
+      int lane_idx,
+      ///< LoF mantissa bits for accumulation rounding
+      int accum_mant_bits = 0,
+      ///< LoF rounding mode
+      lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,
+      ///< LoF stochastic rounding bits
+      int stochastic_rounding_bits = 0
     ):
       Base(shared_storage, thread_idx, warp_idx, lane_idx),
+      warp_mma_(accum_mant_bits, rounding_mode, stochastic_rounding_bits),
       smem_iterator_A_(shared_storage.operand_A_ref(), thread_idx),
       smem_iterator_B_(shared_storage.operand_B_ref(), thread_idx),
       smem_write_stage_idx_(0),
@@ -729,6 +738,9 @@ public:
     // Perform the MAC-iterations
     gemm_iters(gemm_k_iterations, accum, iterator_A, iterator_B);
   }
+
+  // Expose pipeline state via alias without changing its original access level
+  using PublicPipeState = PipeState;
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -738,4 +750,3 @@ public:
 }  // namespace cutlass
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
-

@@ -1,5 +1,5 @@
 /***************************************************************************************************
- * Copyright (c) 2017 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2017 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,6 +41,8 @@
 #include "cutlass/matrix_coord.h"
 #include "cutlass/semaphore.h"
 #include "cutlass/arch/arch.h"
+
+#include <lo_float.h>
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -89,12 +91,20 @@ struct Gemm {
     int const *gather_B_indices;
     int const *scatter_D_indices;
 
+    // LoF accumulation parameters
+    int accum_mant_bits;
+    lo_float::Rounding_Mode rounding_mode;
+    int stochastic_rounding_bits;
+
     //
     // Methods
     //
 
     CUTLASS_HOST_DEVICE
-    Params(): swizzle_log_tile(0), semaphore(0), gemm_k_size(0) { }
+    Params(): swizzle_log_tile(0), semaphore(0), gemm_k_size(0),
+      accum_mant_bits(0),
+      rounding_mode(lo_float::Rounding_Mode::RoundToNearestEven),
+      stochastic_rounding_bits(0) { }
 
     CUTLASS_HOST_DEVICE
     Params(
@@ -108,7 +118,10 @@ struct Gemm {
       int *workspace = nullptr,
       int const *gather_A_indices = nullptr,
       int const *gather_B_indices = nullptr,
-      int const *scatter_D_indices = nullptr
+      int const *scatter_D_indices = nullptr,
+      int accum_mant_bits = 0,
+      lo_float::Rounding_Mode rounding_mode = lo_float::Rounding_Mode::RoundToNearestEven,
+      int stochastic_rounding_bits = 0
     ):
       problem_size(problem_size),
       grid_tiled_shape(grid_tiled_shape),
@@ -124,7 +137,10 @@ struct Gemm {
       output_op(output_op),
       gather_A_indices(gather_A_indices),
       gather_B_indices(gather_B_indices),
-      scatter_D_indices(scatter_D_indices) {
+      scatter_D_indices(scatter_D_indices),
+      accum_mant_bits(accum_mant_bits),
+      rounding_mode(rounding_mode),
+      stochastic_rounding_bits(stochastic_rounding_bits) {
 
       int total_gemm_k_iterations = (problem_size.k() + Mma::Shape::kK - 1) / Mma::Shape::kK;
       int gemm_k_iterations = (total_gemm_k_iterations + grid_tiled_shape.k() - 1) / grid_tiled_shape.k();
@@ -264,7 +280,8 @@ struct Gemm {
     //
 
     // Construct thread-scoped matrix multiply
-    Mma mma(shared_storage.main_loop, thread_idx, warp_idx, lane_idx);
+    Mma mma(shared_storage.main_loop, thread_idx, warp_idx, lane_idx,
+            params.accum_mant_bits, params.rounding_mode, params.stochastic_rounding_bits);
 
     typename Mma::FragmentC accumulators;
 
@@ -377,4 +394,3 @@ struct Gemm {
 } // namespace kernel
 } // namespace gemm
 } // namespace cutlass
-
